@@ -31,7 +31,7 @@ enum bool{ FALSE, TRUE }; // Pseudo-Datentyp bool erzeugen
 enum bool isTestMode = TRUE;
 
 static int8_t nbOfCountsTillTempMeasure = 10;
-
+volatile int16_t meanTemp; // mittlere Temperatur aus den letzten drei Messungen
 
 // Werte von Potentiometern, die zu Testzwecken verwendet werden
 volatile uint16_t pot1Value, pot2Value;
@@ -47,6 +47,19 @@ int16_t _getCurrentTemperature(){
 	if(isTestMode){ curTemperature = (int16_t)(pot1Value); }
 	else curTemperature = 350;
 	printf("\n\rcurrent Temp:  %u 1/10 Grad Celsius",curTemperature);
+	
+	// die letzten drei Messungen in Array speichern
+	latestTemps[2] = latestTemps[1];
+	latestTemps[1] = latestTemps[0];
+	latestTemps[0] = curTemperature;
+	printf(" letzte:  %u, %u, %u ",latestTemps[0], latestTemps[1], latestTemps[2]);
+	
+	// Mittelwert bilden
+	meanTemp = 0;
+	for(int8_t i=0; i<3; i++){ meanTemp += latestTemps[i]; }
+	meanTemp = (int16_t) meanTemp / 3;                
+	printf(" mittlere Temperatur: %u in 1/10 Grad Celsius", meanTemp);
+	
 	
 	return curTemperature;
 }
