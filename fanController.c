@@ -52,7 +52,7 @@ enum bool isTestMode = TRUE;
 enum bool showDebugMessages = FALSE;
 volatile enum bool showExternalUserOutput = FALSE;
 
-static int8_t nbOfCountsTillTempMeasure = 10;
+//2do: Messzeiten richtig einstellen... static int8_t nbOfCountsTillTempMeasure = 10;
 volatile int16_t meanTemp; // mittlere Temperatur aus den letzten drei Messungen
 volatile int16_t curFanSpeed; // aktuelle Lüfterdrehlzahl in RPM
 volatile int16_t targetFanSpeed; // Regler-Ziel-Lüfterdrehlzahl in RPM
@@ -62,6 +62,52 @@ volatile uint16_t pot1Value, pot2Value;
 
 volatile int16_t curDutyCycleInPercent = 0;
 volatile int latestTemps[3] = {0,0,0}; 
+	
+void _setPwmDutyCycle(uint8_t dutyCycleValue){
+	if(showDebugMessages){ printf("PWM DutyCycle Wert (0-255) = %u \n", dutyCycleValue); };
+	OCR0A = dutyCycleValue;
+}
+
+
+int16_t _getCurrentTemperature(){
+	int16_t curTemperature;
+	if(isTestMode){ curTemperature = (int16_t)(pot1Value); }
+	else curTemperature = 350;
+	
+	return curTemperature;
+}
+
+int16_t _calculateTargetFanSpeed(){
+	int16_t targetFanSpeed;
+	if(fanState == FAN_STATE_IDLE) targetFanSpeed = 0;
+	else if(fanState == FAN_STATE_ALARM) targetFanSpeed = MAX_FAN_RPM;
+	else{
+		// den temperaturabhängigen Zielwert für die Lüfterumdrehungen aus linearer Beziehung Temperatur - Lüfterdrehzahl berechnen
+		double percentageOfMaxTempAsDouble = ((double)(meanTemp - COOLING_STATE_TRESHOLD_TEMP) / (double)(ALARM_STATE_TRESHOLD_TEMP - COOLING_STATE_TRESHOLD_TEMP));
+		targetFanSpeed = (int16_t)(MIN_FAN_RPM + (MAX_FAN_RPM - MIN_FAN_RPM)*percentageOfMaxTempAsDouble);
+	}
+	
+	return targetFanSpeed;
+}
+
+int16_t _getCurrentFanSpeed(){
+	int16_t curFanSpeed;
+	// Im Testmodus Wert von 2. Potentiometer holen
+	if(isTestMode){ curFanSpeed = (int16_t)(((double)pot2Value/1023.0)*(double)MAX_FAN_RPM); }
+	else {
+		// Lüfter-Tachosignal sendet 2 Impule pro Umdrehung, somit müssen zur Bestimmung
+		// der RPM die Impulse durch zwei geteilt werden, und der Wert auf Minuten skaliert werden
+		// Achtung: einfache Formel setzt 1-sekündiges Messintervall voraus - noch anzupassen!
+		/* TODO: sauber implementieren! */
+		int16_t fanTachoImpulses = 200;
+		curFanSpeed = (fanTachoImpulses / 2)  * 60;
+	}
+	
+	return curFanSpeed;
+}
+
+
+
 
 /* Zeichen empfangen */
 uint8_t uart_getc(void)
@@ -73,12 +119,11 @@ uint8_t uart_getc(void)
 
 uint8_t _uartRead(void){
 	uint8_t c = 0;
+	// Zeichen wurde empfangen, jetzt abholen
 	if ( (UCSR0A & (1<<RXC0)) )
 	{
-		// Zeichen wurde empfangen, jetzt abholen
 		c = uart_getc();
-		printf("\n\rHabe Zeichen %u empfangen", c);
-		
+		if(showDebugMessages){ printf("\n\rHabe Zeichen %u empfangen", c); };	
 	}
 	return c;
 }
@@ -163,46 +208,6 @@ void _handleExternalUserRequest(){
 	showDebugMessages = showExternalUserOutput;
 }
 
-
-int16_t _getCurrentTemperature(){
-	int16_t curTemperature;
-	if(isTestMode){ curTemperature = (int16_t)(pot1Value); }
-	else curTemperature = 350;
-	
-	return curTemperature;
-}
-
-int16_t _calculateTargetFanSpeed(){
-	int16_t targetFanSpeed;
-	if(fanState == FAN_STATE_IDLE) targetFanSpeed = 0;
-	else if(fanState == FAN_STATE_ALARM) targetFanSpeed = MAX_FAN_RPM;
-	else{
-		// den temperaturabhängigen Zielwert für die Lüfterumdrehungen aus linearer Beziehung Temperatur - Lüfterdrehzahl berechnen 
-		double percentageOfMaxTempAsDouble = ((double)(meanTemp - COOLING_STATE_TRESHOLD_TEMP) / (double)(ALARM_STATE_TRESHOLD_TEMP - COOLING_STATE_TRESHOLD_TEMP));
-		targetFanSpeed = (int16_t)(MIN_FAN_RPM + (MAX_FAN_RPM - MIN_FAN_RPM)*percentageOfMaxTempAsDouble);
-	}
-	
-	return targetFanSpeed;
-}
-
-int16_t _getCurrentFanSpeed(){
-	int16_t curFanSpeed;
-	// Im Testmodus Wert von 2. Potentiometer holen
-	if(isTestMode){ curFanSpeed = (int16_t)(((double)pot2Value/1023.0)*(double)MAX_FAN_RPM); }
-	else {
-		// Lüfter-Tachosignal sendet 2 Impule pro Umdrehung, somit müssen zur Bestimmung
-		// der RPM die Impulse durch zwei geteilt werden, und der Wert auf Minuten skaliert werden
-		// Achtung: einfache Formel setzt 1-sekündiges Messintervall voraus - noch anzupassen!
-		/* TODO: sauber implementieren! */
-		int16_t fanTachoImpulses = 200;
-		curFanSpeed = (fanTachoImpulses / 2)  * 60;
-	}
-	
-	return curFanSpeed;
-}
-
-
-
 void _initUART(void)
 {
 	// Baudrate setzen
@@ -213,8 +218,6 @@ void _initUART(void)
 	// Empfang und Versand ermöglichen, Interrupt für Empfang aktivieren
 	UCSR0B |= (1<<RXEN0) | (1<<TXEN0);
 }
-
-
 
 int _uartSendByte(char u8Data, FILE *stream)
 {
@@ -307,10 +310,6 @@ void _initPWM(){
 	TCCR0A = 0b10000011;
 	TCCR0B = 0b00000001;
 }
-void _setPwmDutyCycle(uint8_t dutyCycleValue){
-	if(showDebugMessages){ printf("PWM DutyCycle Wert (0-255) = %u \n", dutyCycleValue); };
-	OCR0A = dutyCycleValue;
-}
 
 
 void _initRevCounter(){
@@ -358,6 +357,7 @@ int main(void)
 	//Dem Stream mit Standart-I/O-Streams verknüpfen, so daß klassische prinf(...) möglich sind
 	stdout=&usart0_str;
 	
+	// Ausgabe von Startwerten
 	printf("\n\n\n\rStartwert mit F_CPU: %u - fuer UART = %u \n",(uint16_t)F_CPU, (uint16_t)UBRR_VALUE);
 	
 	if(isTestMode) {
@@ -387,7 +387,7 @@ int main(void)
 	
 		// Alarmmodus behandeln, falls notwendig	
 		_handleExternalUserRequest();
-			
+				
 	    if(isTestMode) _delay_ms(MAIN_DELAY_MILLIS_TESTMODE);
 		else _delay_ms(MAIN_DELAY_MILLIS); 
     }
