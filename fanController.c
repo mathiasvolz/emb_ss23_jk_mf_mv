@@ -49,9 +49,13 @@ enum bool{ FALSE, TRUE }; // Pseudo-Datentyp bool erzeugen
 volatile int8_t fanState = FAN_STATE_IDLE;	
 
 enum bool isTestMode = TRUE;
+enum bool showDebugMessages = FALSE;
+volatile enum bool showExternalUserOutput = FALSE;
 
 static int8_t nbOfCountsTillTempMeasure = 10;
 volatile int16_t meanTemp; // mittlere Temperatur aus den letzten drei Messungen
+volatile int16_t curFanSpeed; // aktuelle Lüfterdrehlzahl in RPM
+volatile int16_t targetFanSpeed; // Regler-Ziel-Lüfterdrehlzahl in RPM
 
 // Werte von Potentiometern, die zu Testzwecken verwendet werden
 volatile uint16_t pot1Value, pot2Value;
@@ -59,33 +63,66 @@ volatile uint16_t pot1Value, pot2Value;
 volatile int16_t curDutyCycleInPercent = 0;
 volatile int latestTemps[3] = {0,0,0}; 
 
+/* Zeichen empfangen */
+uint8_t uart_getc(void)
+{
+	while (!(UCSR0A & (1<<RXC0)))   // warten bis Zeichen verfuegbar
+	;
+	return UDR0;                   // Zeichen aus UDR an Aufrufer zurueckgeben
+}
+
+uint8_t _uartRead(void){
+	uint8_t c = 0;
+	if ( (UCSR0A & (1<<RXC0)) )
+	{
+		// Zeichen wurde empfangen, jetzt abholen
+		c = uart_getc();
+		printf("\n\rHabe Zeichen %u empfangen", c);
+		
+	}
+	return c;
+}
+
+
+/* liest die aktuelle Temperatur,
+   verwaltet die letzten drei Temperaturmessungen,
+   errechnet Mittelwert aus den letzten drei Temperaturmessungen, 
+   und setzt den aktuellen Zustand (Idle, Cooling oder Alarm)
+*/
 void _handleTemperatures(){
 	int16_t curTemp = _getCurrentTemperature();
+	if(showDebugMessages){ printf("\n\rAktuelle Temperatur:  %u 1/10 Grad Celsius", curTemp); }
 	
 	// die letzten drei Messungen in Array speichern
 	latestTemps[2] = latestTemps[1];
 	latestTemps[1] = latestTemps[0];
 	latestTemps[0] = curTemp;
-	printf(" letzte:  %u, %u, %u ",latestTemps[0], latestTemps[1], latestTemps[2]);
+	if(showDebugMessages){ printf(" letzte:  %u, %u, %u ",latestTemps[0], latestTemps[1], latestTemps[2]);	}
 	
 	// Mittelwert aus den letzten drei Messungen bilden
 	meanTemp = 0;
 	for(int8_t i=0; i<3; i++){ meanTemp += latestTemps[i]; }
 	meanTemp = (int16_t) meanTemp / 3;
-	printf(" mittlere Temperatur: %u in 1/10 Grad Celsius", meanTemp);
+	if(showDebugMessages){ printf(" mittlere Temperatur: %u in 1/10 Grad Celsius", meanTemp); }
 	
 	// aufgrund der mittleren Temperatur den Zustand setzen
 	if(meanTemp < COOLING_STATE_TRESHOLD_TEMP) { fanState = FAN_STATE_IDLE; }
 	else if(meanTemp < ALARM_STATE_TRESHOLD_TEMP) { fanState = FAN_STATE_COOLING; }
 	else if(meanTemp >= ALARM_STATE_TRESHOLD_TEMP) { fanState = FAN_STATE_ALARM; }
 	
-	printf("\n\rZustand: %u", fanState);	
+	if(showDebugMessages){ printf("\n\rZustand: %u", fanState); }	
 }
+
+/* liest die aktuelle Anzahl an Lüfterumdrehungen,
+  berechnet den Zielwert auf Basis der aktuellen, mittleren Temperatur,
+  stellt den DutyCyle für das PWM ein,
+  und löst das PWM aus
+*/
 void _handleFanSpeed(){
-	int16_t curFanSpeed = _getCurrentFanSpeed();
-	int16_t targetFanSpeed = _calculateTargetFanSpeed();
+	curFanSpeed = _getCurrentFanSpeed();
+	targetFanSpeed = _calculateTargetFanSpeed();
 	
-	printf("\n\rAktuelle Anzahl Luefterumdrehungen:  %u RPM / Zielwert: %u RPM\n",curFanSpeed, targetFanSpeed);
+	if(showDebugMessages){ printf("\n\rAktuelle Anzahl Luefterumdrehungen:  %u RPM / Zielwert: %u RPM\n",curFanSpeed, targetFanSpeed); }
 	
 	if(targetFanSpeed == 0){
 		curDutyCycleInPercent = 0;
@@ -101,20 +138,36 @@ void _handleFanSpeed(){
 	}
 	// Ansonsten: nichts tun :)
 	
+	// PWM einstellen
 	_setPwmDutyCycle((uint8_t)(2.55*curDutyCycleInPercent));
 }
 
 void _handleAlarm(){
-	
+	if(fanState == FAN_STATE_ALARM){
+		printf("\n\n\rALARM!!! TEMPERATUR HAT DEN MAXIMALWERT UEBERSCHRITTEN!");
+		printf("\n\rMittlere Temperatur: %u in 1/10 Grad Celsius, letzte drei Messungen:  %u, %u, %u", meanTemp,latestTemps[0], latestTemps[1], latestTemps[2]);
+		printf("\n\rAktuelle Luefterdrehzahl: %u RPM - Regler-Ziel-Luefterdrehzahl %u RPM", curFanSpeed, targetFanSpeed);
+	}
 }
 
+void _handleExternalUserRequest(){
+	int8_t c= _uartRead();
+	// Bei Eingabe von 'i' Ausgaben für entfernten Benutzer über UART aktivieren
+	if(c == 105) showExternalUserOutput = TRUE;
+	// Bei Eingabe von 'n' Ausgaben für entfernten Benutzer über UART deaktivieren
+	else if(c == 113) {
+		printf("\n\n\rUART-Ausgaben deaktiviert - wieder einstellen mit Tastendruck 'i'");
+		showExternalUserOutput = FALSE;
+	}
+	// Temporärer Hack
+	showDebugMessages = showExternalUserOutput;
+}
 
 
 int16_t _getCurrentTemperature(){
 	int16_t curTemperature;
 	if(isTestMode){ curTemperature = (int16_t)(pot1Value); }
 	else curTemperature = 350;
-	printf("\n\rAktuelle Temperatur:  %u 1/10 Grad Celsius", curTemperature);
 	
 	return curTemperature;
 }
@@ -125,9 +178,7 @@ int16_t _calculateTargetFanSpeed(){
 	else if(fanState == FAN_STATE_ALARM) targetFanSpeed = MAX_FAN_RPM;
 	else{
 		// den temperaturabhängigen Zielwert für die Lüfterumdrehungen aus linearer Beziehung Temperatur - Lüfterdrehzahl berechnen 
-		//int16_t percentageOfMaxTemp = (int16_t)(((ALARM_STATE_TRESHOLD_TEMP - meanTemp) / (ALARM_STATE_TRESHOLD_TEMP - COOLING_STATE_TRESHOLD_TEMP))*100);
 		double percentageOfMaxTempAsDouble = ((double)(meanTemp - COOLING_STATE_TRESHOLD_TEMP) / (double)(ALARM_STATE_TRESHOLD_TEMP - COOLING_STATE_TRESHOLD_TEMP));
-		printf("\n\r prozent der Maximaltemperatur im Intervall: %u Prozent ", (int16_t) (percentageOfMaxTempAsDouble*100));
 		targetFanSpeed = (int16_t)(MIN_FAN_RPM + (MAX_FAN_RPM - MIN_FAN_RPM)*percentageOfMaxTempAsDouble);
 	}
 	
@@ -159,9 +210,11 @@ void _initUART(void)
 	UBRR0L = (uint8_t)UBRR_VALUE;
 	// Format 8N1
 	UCSR0C |= (1<<UCSZ01)|(1<<UCSZ00);
-	// Empfang und Versand ermöglichen
-	UCSR0B |= (1<<RXEN0)|(1<<TXEN0);
+	// Empfang und Versand ermöglichen, Interrupt für Empfang aktivieren
+	UCSR0B |= (1<<RXEN0) | (1<<TXEN0);
 }
+
+
 
 int _uartSendByte(char u8Data, FILE *stream)
 {
@@ -195,6 +248,8 @@ void _init_Testmode()
 	ADMUX = 0b01100000; // PIN 27
 	ADCSRA = 0b10001011;
 	ADCSRB = 0b00000000;	
+	(showDebugMessages == TRUE) ? printf("\n\rDebug-UART-Ausgaben aktiviert") : printf("\n\rDebug-UART-Ausgaben deaktiviert");
+	printf("\n\n\rMit Tastendruck 'i' Debug aktivieren, mit 'q' deaktivieren");
 }
 
 ISR(ADC_vect) {
@@ -253,7 +308,7 @@ void _initPWM(){
 	TCCR0B = 0b00000001;
 }
 void _setPwmDutyCycle(uint8_t dutyCycleValue){
-	printf("PWM DutyCycle value = %u \n", dutyCycleValue);
+	if(showDebugMessages){ printf("PWM DutyCycle Wert (0-255) = %u \n", dutyCycleValue); };
 	OCR0A = dutyCycleValue;
 }
 
@@ -302,6 +357,7 @@ int main(void)
 	
 	//Dem Stream mit Standart-I/O-Streams verknüpfen, so daß klassische prinf(...) möglich sind
 	stdout=&usart0_str;
+	
 	printf("\n\n\n\rStartwert mit F_CPU: %u - fuer UART = %u \n",(uint16_t)F_CPU, (uint16_t)UBRR_VALUE);
 	
 	if(isTestMode) {
@@ -328,10 +384,12 @@ int main(void)
 	
 		// Alarmmodus behandeln, falls notwendig
 		_handleAlarm();
-	  
+	
+		// Alarmmodus behandeln, falls notwendig	
+		_handleExternalUserRequest();
+			
 	    if(isTestMode) _delay_ms(MAIN_DELAY_MILLIS_TESTMODE);
 		else _delay_ms(MAIN_DELAY_MILLIS); 
-	    
     }
 }
 
