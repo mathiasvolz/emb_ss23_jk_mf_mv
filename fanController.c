@@ -1,23 +1,40 @@
 /*
  * ea_ohne_langos.c
  *
+ * Temperaturregelung für IT-Systeme unter Verwendung von ATMega328P und Atmel Studio,
+ * Einsendeaufgabe von Jessica Kunzendorf, Malte Fonfara und Mathias Volz im Rahmen des Moduls "Eingebettete Systeme" (REG Online) im Sommersemester 2023.
+ * Bei dieser Lösung wurde kein LangOS verwendet.
+ * 
  * Created: 14.06.2023 11:41:24
- * Author : mvolz
+ * Author : Jessica Kunzendorf, Malte Fonfara, Mathias Volz
+ * 
  */ 
 
 #include <stdio.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #ifndef F_CPU
-#define F_CPU 11059200UL
+#define F_CPU 11059200UL  // Externer Oszillator mit 11,0592 MHz
 #endif
 #include <util/delay.h>
 
 #define USART_BAUDRATE 9600 // Einstellung für UART - Baudrate 
 #define UBRR_VALUE (((F_CPU / (USART_BAUDRATE * 16UL))) - 1)
 
+#define FAN_STATE_IDLE 1
+#define FAN_STATE_COOLING 2
+#define FAN_STATE_ALARM 3
+
+#define COOLING_STATE_TRESHOLD_TEMP 300		// Schwellwert-Temperatur des Zustands 2: Kühlend in 1/10 Grad
+#define ALARM_STATE_TRESHOLD_TEMP 500		// Schwellwert-Temperatur des Zustands 3: Alarm in 1/10 Grad
+
 #define MAIN_DELAY_MILLIS 1000 // Verzögerung für jeden while(1){..}-Durchlauf in main() im Nutzer-Modus
-#define MAIN_DELAY_MILLIS_TESTMODE 1000 // Verzögerung für jeden while(1){..}-Durchlauf in main() im Test-Modus
+#define MAIN_DELAY_MILLIS_TESTMODE 100 // Verzögerung für jeden while(1){..}-Durchlauf in main() im Test-Modus
+
+#define MAX_FAN_RPM 4800 // Maximal mögliche Anzahl von Lüfterumdrehungen pro Minute
+#define MIN_FAN_RPM 1000 // Minimal mögliche Anzahl von Lüfterumdrehungen pro Minute
+#define MIN_PWM_DUTY_CYCLE_IN_PERCENT 40 // minimaler DutyCycle für PWM-Signal, bei dem der Lüfter anläuft (experimentell ermittelt)
+
 
 #define BIT_IS_SET(byte, bit) (byte & (1 << bit))
 #define BIT_IS_CLEAR(byte, bit) (!(byte & (1 << bit)))
@@ -26,7 +43,10 @@ uint8_t counterStart = 131;
 uint16_t scaleFactor = 10;
 uint16_t fanCounter = 0;
 
+
 enum bool{ FALSE, TRUE }; // Pseudo-Datentyp bool erzeugen
+	
+volatile int8_t fanState = FAN_STATE_IDLE;	
 
 enum bool isTestMode = TRUE;
 
@@ -36,40 +56,98 @@ volatile int16_t meanTemp; // mittlere Temperatur aus den letzten drei Messungen
 // Werte von Potentiometern, die zu Testzwecken verwendet werden
 volatile uint16_t pot1Value, pot2Value;
 
+volatile int16_t curDutyCycleInPercent = 0;
 volatile int latestTemps[3] = {0,0,0}; 
 
-void _checkTemperatures(){
+void _handleTemperatures(){
 	int16_t curTemp = _getCurrentTemperature();
+	
+	// die letzten drei Messungen in Array speichern
+	latestTemps[2] = latestTemps[1];
+	latestTemps[1] = latestTemps[0];
+	latestTemps[0] = curTemp;
+	printf(" letzte:  %u, %u, %u ",latestTemps[0], latestTemps[1], latestTemps[2]);
+	
+	// Mittelwert aus den letzten drei Messungen bilden
+	meanTemp = 0;
+	for(int8_t i=0; i<3; i++){ meanTemp += latestTemps[i]; }
+	meanTemp = (int16_t) meanTemp / 3;
+	printf(" mittlere Temperatur: %u in 1/10 Grad Celsius", meanTemp);
+	
+	// aufgrund der mittleren Temperatur den Zustand setzen
+	if(meanTemp < COOLING_STATE_TRESHOLD_TEMP) { fanState = FAN_STATE_IDLE; }
+	else if(meanTemp < ALARM_STATE_TRESHOLD_TEMP) { fanState = FAN_STATE_COOLING; }
+	else if(meanTemp >= ALARM_STATE_TRESHOLD_TEMP) { fanState = FAN_STATE_ALARM; }
+	
+	printf("\n\rZustand: %u", fanState);	
 }
+void _handleFanSpeed(){
+	int16_t curFanSpeed = _getCurrentFanSpeed();
+	int16_t targetFanSpeed = _calculateTargetFanSpeed();
+	
+	printf("\n\rAktuelle Anzahl Luefterumdrehungen:  %u RPM / Zielwert: %u RPM\n",curFanSpeed, targetFanSpeed);
+	
+	if(targetFanSpeed == 0){
+		curDutyCycleInPercent = 0;
+	}
+	// Wenn Lüfter langsamer dreht, als der berechnete Zielwert: PWM Duty Cycle steigern
+	else if(curFanSpeed < targetFanSpeed){
+		if(curDutyCycleInPercent < 100)
+		curDutyCycleInPercent++;
+	}
+	// Wenn Lüfter schneller dreht, als der berechnete Zielwert: PWM Duty Cycle verringern
+	else if(curFanSpeed > targetFanSpeed){
+		if(curDutyCycleInPercent > MIN_PWM_DUTY_CYCLE_IN_PERCENT) curDutyCycleInPercent--;
+	}
+	// Ansonsten: nichts tun :)
+	
+	_setPwmDutyCycle((uint8_t)(2.55*curDutyCycleInPercent));
+}
+
+void _handleAlarm(){
+	
+}
+
+
 
 int16_t _getCurrentTemperature(){
 	int16_t curTemperature;
 	if(isTestMode){ curTemperature = (int16_t)(pot1Value); }
 	else curTemperature = 350;
-	printf("\n\rcurrent Temp:  %u 1/10 Grad Celsius",curTemperature);
-	
-	// die letzten drei Messungen in Array speichern
-	latestTemps[2] = latestTemps[1];
-	latestTemps[1] = latestTemps[0];
-	latestTemps[0] = curTemperature;
-	printf(" letzte:  %u, %u, %u ",latestTemps[0], latestTemps[1], latestTemps[2]);
-	
-	// Mittelwert bilden
-	meanTemp = 0;
-	for(int8_t i=0; i<3; i++){ meanTemp += latestTemps[i]; }
-	meanTemp = (int16_t) meanTemp / 3;                
-	printf(" mittlere Temperatur: %u in 1/10 Grad Celsius", meanTemp);
-	
+	printf("\n\rAktuelle Temperatur:  %u 1/10 Grad Celsius", curTemperature);
 	
 	return curTemperature;
 }
-void _getCurrentFanRevs(){
-	int16_t curFanRevs;
-	if(isTestMode){ curFanRevs = (int16_t)(pot1Value); }
-	else curFanRevs = 350;
+
+int16_t _calculateTargetFanSpeed(){
+	int16_t targetFanSpeed;
+	if(fanState == FAN_STATE_IDLE) targetFanSpeed = 0;
+	else if(fanState == FAN_STATE_ALARM) targetFanSpeed = MAX_FAN_RPM;
+	else{
+		// den temperaturabhängigen Zielwert für die Lüfterumdrehungen aus linearer Beziehung Temperatur - Lüfterdrehzahl berechnen 
+		//int16_t percentageOfMaxTemp = (int16_t)(((ALARM_STATE_TRESHOLD_TEMP - meanTemp) / (ALARM_STATE_TRESHOLD_TEMP - COOLING_STATE_TRESHOLD_TEMP))*100);
+		double percentageOfMaxTempAsDouble = ((double)(meanTemp - COOLING_STATE_TRESHOLD_TEMP) / (double)(ALARM_STATE_TRESHOLD_TEMP - COOLING_STATE_TRESHOLD_TEMP));
+		printf("\n\r prozent der Maximaltemperatur im Intervall: %u Prozent ", (int16_t) (percentageOfMaxTempAsDouble*100));
+		targetFanSpeed = (int16_t)(MIN_FAN_RPM + (MAX_FAN_RPM - MIN_FAN_RPM)*percentageOfMaxTempAsDouble);
+	}
 	
-	printf("\n\rcurrent Fan Revs:  %u RPM\n",curFanRevs);
+	return targetFanSpeed;
+}
+
+int16_t _getCurrentFanSpeed(){
+	int16_t curFanSpeed;
+	// Im Testmodus Wert von 2. Potentiometer holen
+	if(isTestMode){ curFanSpeed = (int16_t)(((double)pot2Value/1023.0)*(double)MAX_FAN_RPM); }
+	else {
+		// Lüfter-Tachosignal sendet 2 Impule pro Umdrehung, somit müssen zur Bestimmung
+		// der RPM die Impulse durch zwei geteilt werden, und der Wert auf Minuten skaliert werden
+		// Achtung: einfache Formel setzt 1-sekündiges Messintervall voraus - noch anzupassen!
+		/* TODO: sauber implementieren! */
+		int16_t fanTachoImpulses = 200;
+		curFanSpeed = (fanTachoImpulses / 2)  * 60;
+	}
 	
+	return curFanSpeed;
 }
 
 
@@ -224,7 +302,7 @@ int main(void)
 	
 	//Dem Stream mit Standart-I/O-Streams verknüpfen, so daß klassische prinf(...) möglich sind
 	stdout=&usart0_str;
-	printf("startwert mit F_CPU: %u - fuer UART = %u \n",(uint16_t)F_CPU, (uint16_t)UBRR_VALUE);
+	printf("\n\n\n\rStartwert mit F_CPU: %u - fuer UART = %u \n",(uint16_t)F_CPU, (uint16_t)UBRR_VALUE);
 	
 	if(isTestMode) {
 		// Die zwei für das Testing verwendeten Potentiometer (10K) initialisieren
@@ -242,19 +320,15 @@ int main(void)
 	
 	while(1)
     {
-	    //reading potentiometer value and recalculating to Ohms
-	  //  pot1Value = (double)getADCValue(4);
-	    //sending potentiometer value to terminal
-	    //printf("\n\rPot1 = %u Ohm  - ", (uint16_t)pot1Value);
-		_checkTemperatures();
-		_getCurrentFanRevs();
-	   // pot2Value = (double)getADCValue(5);
-		//sending potentiometer avlue to terminal
-		//printf("Pot2 = %u Ohm\n", (uint16_t)pot2Value);
-		double percValue = (double)pot1Value / 1024.0;
-		_setPwmDutyCycle((uint8_t)255.0*percValue);
-		//setPwmDutyCycle((uint8_t)255*(pot1Value/1023));
+		// Temperaturverwaltung
+		_handleTemperatures();
 		
+		// Lüftergeschwindigkeit behandeln
+		_handleFanSpeed();
+	
+		// Alarmmodus behandeln, falls notwendig
+		_handleAlarm();
+	  
 	    if(isTestMode) _delay_ms(MAIN_DELAY_MILLIS_TESTMODE);
 		else _delay_ms(MAIN_DELAY_MILLIS); 
 	    
