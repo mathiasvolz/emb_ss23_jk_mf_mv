@@ -3,8 +3,10 @@
  *
  * Temperaturregelung für IT-Systeme unter Verwendung von ATMega328P und Atmel Studio,
  * Einsendeaufgabe von Jessica Kunzendorf, Malte Fonfara und Mathias Volz im Rahmen des Moduls "Eingebettete Systeme" (REG Online) im Sommersemester 2023.
- * Bei dieser Lösung wurde kein LangOS verwendet.
+ * Bei dieser Lösung wurde LangOS nicht verwendet.
  * 
+ * Aktuell fehlen noch: korrekte Auswertung des Temperatursensors KTY81-120, und Tachosignal-Auswertung über Timer1
+ *
  * Created: 14.06.2023 11:41:24
  * Author : Jessica Kunzendorf, Malte Fonfara, Mathias Volz
  * 
@@ -187,6 +189,7 @@ void _handleFanSpeed(){
 	_setPwmDutyCycle((uint8_t)(2.55*curDutyCycleInPercent));
 }
 
+/* setzt über UART Alarmmeldungen ab */
 void _handleAlarm(){
 	if(fanState == FAN_STATE_ALARM){
 		printf("\n\n\rALARM!!! TEMPERATUR HAT DEN MAXIMALWERT UEBERSCHRITTEN!");
@@ -195,6 +198,7 @@ void _handleAlarm(){
 	}
 }
 
+/* behandelt Anfragen von externen Benutzern über UART (Werte ausgeben aktivieren / deaktivieren) */
 void _handleExternalUserRequest(){
 	int8_t c= _uartRead();
 	// Bei Eingabe von 'i' Ausgaben für entfernten Benutzer über UART aktivieren
@@ -215,16 +219,13 @@ void _initUART(void)
 	UBRR0L = (uint8_t)UBRR_VALUE;
 	// Format 8N1
 	UCSR0C |= (1<<UCSZ01)|(1<<UCSZ00);
-	// Empfang und Versand ermöglichen, Interrupt für Empfang aktivieren
+	// Empfang und Versand ermöglichen
 	UCSR0B |= (1<<RXEN0) | (1<<TXEN0);
 }
 
 int _uartSendByte(char u8Data, FILE *stream)
 {
-	if(u8Data == '\n')
-	{
-		_uartSendByte('\r', stream);
-	}
+	if(u8Data == '\n'){ _uartSendByte('\r', stream);}
 	// warten bis das letzte Bit eingelesen wurde
 	while(!(UCSR0A&(1<<UDRE0))){};
 	// Daten versenden
